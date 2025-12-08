@@ -1,12 +1,11 @@
 syntax = "proto3";
-package = aequitas;
+package aequitas;
 
-message DesicionEvent {
+message DecisionEvent {
     string applicant_id = 1;
     int32 age = 2;
     int32 race = 3;
     int32 sex = 4;
     int32 decision = 5;
     double approval_probability = 6;
-    int32 timestamp_ms = 7;
-}
+    int64 timestamp_ms = 7;

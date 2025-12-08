@@ -1,29 +1,44 @@
 version: '3.8'
+
 services:
-  zookeeper:    # zookeeper - required for kafka
+  zookeeper:
     image: confluentinc/cp-zookeeper:7.7.0
+    container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
 
-  kafka:    # kafka :-)
+  kafka:
     image: confluentinc/cp-kafka:7.7.0
-    depends_on: [zookeeper]
+    container_name: kafka
+    depends_on:
+      - zookeeper
     ports:
-      - "9092:9092"
+      - "9092:9092"   # internal listener port
+      - "9093:9093"   # external listener port
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+
+      # two listener names: PLAINTEXT (internal, used by schema-registry) and EXTERNAL (host)
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
 
-  schema-registry:    # requirede for storing protobuf / json for kafka producers
+  schema-registry:
     image: confluentinc/cp-schema-registry:7.7.0
-    depends_on: [kafka]
+    container_name: schema-registry
+    depends_on:
+      - kafka
     ports:
-      - "8081:8081"
+      - 8081:8081
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: zookeeper:2181
