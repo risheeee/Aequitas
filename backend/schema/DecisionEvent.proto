@@ -9,3 +9,4 @@ message DecisionEvent {
     int32 decision = 5;
     double approval_probability = 6;
     int64 timestamp_ms = 7;
+}
