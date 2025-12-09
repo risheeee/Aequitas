@@ -1,9 +1,12 @@
 import os
-import json
+import sys
 import time
 from datetime import datetime
 from dotenv import load_dotenv
-from confluent_kafka import Consumer, KafkaError
+from confluent_kafka import DeserializingConsumer, KafkaError
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.protobuf import ProtobufDeserializer
+from confluent_kafka.serialization import StringDeserializer
 from supabase import create_client, Client
 from schema.DecisionEvent_pb2 import DecisionEvent
 
@@ -14,17 +17,24 @@ url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")
 if not url or not key:
     print("Supabase credentials not found :-(")
+    sys.exit(1)
 
 supabase: Client = create_client(url, key)
 
-# kafka config
+# kafka + schema registry config
+sr_client = SchemaRegistryClient({"url": "http://localhost:8081"})
+protobuf_deserializer = ProtobufDeserializer(DecisionEvent, {'use.deprecated.format': False})
+string_deserializer = StringDeserializer('utf_8')
+
 conf = {
     'bootstrap.servers': os.environ.get("KAFKA_BOOTSTRAP_SERVERS"),
-    'group.id': 'supabase-archiver-group-v1',
-    'auto.offset.reset': 'eearliest'
+    'key.deserializer': string_deserializer,
+    'value.deserializer': protobuf_deserializer,
+    'group.id': 'supabase-archiver-group-v3', 
+    'auto.offset.reset': 'earliest'
 }
 
-consumer = Consumer(conf)
+consumer = DeserializingConsumer(conf)
 topic = os.environ.get("KAFKA_TOPIC")
 consumer.subscribe([topic])
 
@@ -33,16 +43,23 @@ print(f"consumer started. listening to '{topic}'")
 try:
     while True:
         msg = consumer.poll(1.0)
+        
         if msg is None:
             continue
+            
         if msg.error():
+            if msg.error().code() == KafkaError._PARTITION_EOF:
+                continue
             print(f"🍒 Error: {msg.error()}")
-            break
+            continue
 
         # process msg once found
-        event = DecisionEvent()
+        event = msg.value()
+        
+        if event is None:
+            continue
+
         try:
-            event.ParseFromString(msg.value())
             # convert the timestamp for supabase / postgre format
             obj = datetime.fromtimestamp(event.timestamp_ms)
             iso_timestamp = obj.isoformat()
@@ -59,11 +76,11 @@ try:
             }
 
             # insert into supabase
-            response = supabase.table("decisions").insert(row).execute()    # 'decisions' is the table name in sql created on supabase
+            response = supabase.table("decisions").insert(row).execute()        # 'decisions' is the table name in sql created on supabase
             print(f"🥵 Saved: {event.applicant_id[:8]}... | Dec: {event.decision} | Prob: {event.approval_probability:.2f}")
 
         except Exception as e:
-            print(f"error processign msg: {e}")
+            print(f"🍒 error processign msg: {e}")
 
 except KeyboardInterrupt:
     print("\n Stopping consumer..")
