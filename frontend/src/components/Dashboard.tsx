@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
-import { AlertCircle, CheckCircle, ShieldAlert } from 'lucide-react'
+import { AlertCircle, CheckCircle, ShieldAlert, Lock} from 'lucide-react'
+import { useAuth } from 'react-oidc-context' // <--- 1. Import Auth Hook
 
 // Matches the Supabase table structure
 interface Decision {
@@ -15,6 +16,7 @@ interface Decision {
 }
 
 export default function Dashboard() {
+  const auth = useAuth() // <--- 2. Get Auth Context
   const [decisions, setDecisions] = useState<Decision[]>([])
   const [stats, setStats] = useState({ total: 0, denied: 0 })
 
@@ -51,10 +53,39 @@ export default function Dashboard() {
     if (error) console.error('Error fetching:', error)
     else {
       setDecisions(data || [])
-      // Simple client-side calc for demo purposes
       const total = data?.length || 0
       const denied = data?.filter(d => d.decision === 0).length || 0
       setStats({ total, denied })
+    }
+  }
+
+  // <--- 3. New Function to Test Backend Security
+  async function testSecureApi() {
+    const token = auth.user?.access_token
+    
+    if (!token) {
+      alert("No token found. Are you logged in?")
+      return
+    }
+
+    try {
+      // We call the endpoint we created in main.py
+      const res = await fetch('http://localhost:8000/secure-test', {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}` // <--- The magic key
+        }
+      })
+
+      if (res.ok) {
+        const data = await res.json()
+        alert(`✅ Success!\nBackend says: "${data.message}"\nYour Roles: ${JSON.stringify(data.roles)}`)
+      } else {
+        alert(`❌ Error ${res.status}: Access Denied`)
+      }
+    } catch (e) {
+      console.error(e)
+      alert("❌ Connection failed. Is FastAPI running?")
     }
   }
 
@@ -68,7 +99,16 @@ export default function Dashboard() {
             </h1>
             <p className="text-gray-500">Real-time Algorithmic Fairness Audit</p>
           </div>
-          <div className="flex gap-4">
+
+          <div className="flex gap-4 items-center">
+            {/* <--- 4. New Security Test Button */}
+            <button 
+              onClick={testSecureApi}
+              className="flex items-center gap-2 bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700 transition shadow"
+            >
+              <Lock size={16} /> Test Secure API
+            </button>
+
             <div className="bg-white p-4 rounded-lg shadow border border-gray-100">
               <p className="text-xs text-gray-500 uppercase font-semibold">Live Events</p>
               <p className="text-2xl font-bold text-gray-800">{stats.total}</p>

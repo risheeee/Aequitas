@@ -24,7 +24,7 @@ function App() {
             Logged in as: <strong>{auth.user?.profile.preferred_username}</strong>
           </span>
           <button 
-            onClick={() => auth.removeUser()}
+            onClick={() => auth.signoutRedirect()}
             className="bg-red-600 px-3 py-1 rounded hover:bg-red-700 transition"
           >
             Log out

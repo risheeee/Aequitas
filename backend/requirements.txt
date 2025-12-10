@@ -8,3 +8,7 @@ confluent-kafka[protobuf]
 protobuf
 requests
 supabase
+python-jose[cryptography]
+requests
+fastapi
+uvicorn
