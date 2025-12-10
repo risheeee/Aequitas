@@ -13,8 +13,10 @@
     "@supabase/supabase-js": "^2.87.1",
     "date-fns": "^4.1.0",
     "lucide-react": "^0.556.0",
+    "oidc-client-ts": "^3.4.1",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "react-oidc-context": "^3.3.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
