@@ -12,3 +12,4 @@ python-jose[cryptography]
 requests
 fastapi
 uvicorn
+transformers
