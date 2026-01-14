@@ -59,10 +59,10 @@ def delivery_report(err, msg):
 
 count = 0
 start = time.time()
-print("Producer starting")
+print("Producer starting (Limit: 100 requests)")
 
 try:
-    while True:
+    while count < 100:
         applicant = generate_applicant()
         try:
             resp = requests.post(MODEL_URL, json = applicant, timeout = 1)
@@ -88,9 +88,11 @@ try:
             on_delivery=delivery_report
         )
         producer.poll(0)
+        
+        time.sleep(0.1) 
 
         count += 1
-        if count % 1000 == 0:
+        if count % 10 == 0: 
             elapsed = time.time() - start
             print(f"{count} messages | {count/elapsed:.0f} msg/sec")
             start = time.time()
