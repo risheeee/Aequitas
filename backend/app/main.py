@@ -10,6 +10,7 @@ import sys
 from transformers import pipeline
 from supabase import create_client, Client
 import datetime
+import torch
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, "../.env")
@@ -116,7 +117,7 @@ async def predict(applicant: Applicant, background_tasks: BackgroundTasks):
         "decision": decision,
         "probability": round(prob, 4),
         "explanation": explanation_text,
-        "timestamp": datetime.datetime.now().isoformat()
+        "created_at": datetime.datetime.now().isoformat()
     }
 
     background_tasks.add_task(log_to_supabase, db_record)

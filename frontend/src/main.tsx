@@ -5,7 +5,7 @@ import App from './App.tsx'
 import './index.css'
 
 const oidcConfig = {
-  authority: "http://localhost:8080/realms/Aequitas", // The Keycloak Realm URL
+  authority: "http://localhost:8085/realms/Aequitas", // The Keycloak Realm URL
   client_id: "aequitas-frontend", // The Client ID you created
   redirect_uri: window.location.origin, // Returns to localhost:5173 after login
   onSigninCallback: () => {
