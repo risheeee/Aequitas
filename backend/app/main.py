@@ -11,6 +11,10 @@ from transformers import pipeline
 from supabase import create_client, Client
 import datetime
 import torch
+import redis
+import json
+
+redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, "../.env")
@@ -70,16 +74,46 @@ def generate_explaination(decision: int, data: dict):
     if decision == 1:
         return "Application Approved"
     
+    # 1. Pre-calculate the "Reasons" using Python logic
+    # (This helps the small AI know WHAT to focus on)
+    reasons = []
+    if data['capital_gain'] == 0:
+        reasons.append("lack of accumulated capital assets")
+    if data['capital_loss'] > 0:
+        reasons.append(f"recent capital losses of {data['capital_loss']}")
+    if data['hours_per_week'] < 40:
+        reasons.append("part-time employment status")
+    
+    # Fallback if no specific red flags found
+    if not reasons:
+        reasons.append("overall financial risk profile")
+
+    # Join them into a sentence
+    reason_text = " and ".join(reasons)
+
+    # 2. THE NEW PROMPT (Task: Paraphrasing)
+    # T5 is excellent at "Make this formal", bad at "Analyze these numbers"
     prompt = (
-        "Explain why the loan was denied for a person with: "
-        f"Capital Gain: {data['capital_gain']}, "
-        f"Capital Loss: {data['capital_loss']}, "
-        f"Hours worked per week: {data['hours_per_week']}."
-        "Write a short, but professional rejection sentence."
+        f"Rewrite this formally: The loan was rejected due to {reason_text}."
     )
 
-    output = genai_pipe(prompt, max_length = 50, do_sample= False)
-    return output[0]['generated_text']
+    # 3. GENERATE
+    try:
+        output = genai_pipe(
+            prompt, 
+            max_length=64, 
+            do_sample=True,      # Add some creativity
+            temperature=0.7,     # Make it sound natural
+            truncation=True
+        )
+        result = output[0]['generated_text']
+    except Exception as e:
+        result = f"Denied due to {reason_text}." # Fallback
+
+    print(f"🤖 Draft Reason: {reason_text}")
+    print(f"🤖 AI Output: {result}")
+    
+    return result
 
 def log_to_supabase(record: dict):
     try:
@@ -136,3 +170,14 @@ def secure_endpoint(user: dict = Depends(get_current_user)):
         "roles": user.get("realm_access", {}).get("roles", []),
         "status": "Authenticated "
     }
+
+@app.get("/metrics")
+def get_metrics():
+    try:
+        data = redis_client.get("live_metrics")
+        if not data:
+            return {"status": "waiting", "message": "No data in Redis yet"}
+        
+        return json.loads(data)
+    except Exception as e:
+        return {"error": str(e)}
