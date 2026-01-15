@@ -73,6 +73,14 @@ services:
     networks:
       - aequitas-net
 
+  redis:
+    image: redis:alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - default 
+
 networks:
   aequitas-net:
     driver: bridge

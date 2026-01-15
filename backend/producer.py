@@ -65,11 +65,15 @@ try:
     while count < 100:
         applicant = generate_applicant()
         try:
-            resp = requests.post(MODEL_URL, json = applicant, timeout = 1)
+            resp = requests.post(MODEL_URL, json = applicant, timeout = 5)
             if resp.status_code != 200:
+                print("API error")
+                time.sleep(1)
                 continue
             pred = resp.json()
-        except:
+        except Exception as e:
+            print(f"connection error : {e}")
+            time.sleep(5)
             continue
 
         event = DecisionEvent()
@@ -89,7 +93,7 @@ try:
         )
         producer.poll(0)
         
-        time.sleep(0.1) 
+        time.sleep(5) 
 
         count += 1
         if count % 10 == 0: 
