@@ -4,12 +4,19 @@ import { AuthProvider } from 'react-oidc-context'
 import App from './App.tsx'
 import './index.css'
 
+const authority = import.meta.env.VITE_KEYCLOAK_AUTHORITY as string | undefined
+const clientId = import.meta.env.VITE_KEYCLOAK_CLIENT_ID as string | undefined
+const redirectUri = (import.meta.env.VITE_KEYCLOAK_REDIRECT_URI as string | undefined) ?? window.location.origin
+
+if (!authority || !clientId) {
+  throw new Error('Missing VITE_KEYCLOAK_AUTHORITY or VITE_KEYCLOAK_CLIENT_ID in frontend environment')
+}
+
 const oidcConfig = {
-  authority: "http://localhost:8085/realms/Aequitas", // The Keycloak Realm URL
-  client_id: "aequitas-frontend", // The Client ID you created
-  redirect_uri: window.location.origin, // Returns to localhost:5173 after login
+  authority,
+  client_id: clientId,
+  redirect_uri: redirectUri,
   onSigninCallback: () => {
-    // Remove the ugly code from the URL after login
     window.history.replaceState({}, document.title, window.location.pathname)
   }
 }

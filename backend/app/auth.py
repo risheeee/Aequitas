@@ -3,58 +3,78 @@ from fastapi import HTTPException, Security, status
 from fastapi.security import OpenIdConnect
 from jose import jwt, JWTError
 import requests
-import json
+import time
+from typing import Any
 
-KEYCLOAK_URL = os.getenv("KEYCLOAK_URL", "http://localhost:8080")
-REALM = "Aequitas"
+KEYCLOAK_URL = os.getenv("KEYCLOAK_URL", "http://localhost:8085")
+REALM = os.getenv("KEYCLOAK_REALM", "master")
+EXPECTED_ISSUER = f"{KEYCLOAK_URL}/realms/{REALM}"
+EXPECTED_AUDIENCES = [aud.strip() for aud in os.getenv("KEYCLOAK_AUDIENCES", "aequitas-frontend,account").split(",") if aud.strip()]
 CERTS_URL = f"{KEYCLOAK_URL}/realms/{REALM}/protocol/openid-connect/certs"
+JWKS_CACHE_TTL_SECONDS = int(os.getenv("JWKS_CACHE_TTL_SECONDS", "300"))
 
 oauth2_scheme = OpenIdConnect(openIdConnectUrl=f"{KEYCLOAK_URL}/realms/{REALM}/.well-known/openid-configuration")
 
+_jwks_cache: dict[str, Any] = {"keys": [], "fetched_at": 0.0}
+
+
+def _get_jwks() -> dict[str, Any]:
+    now = time.time()
+    if _jwks_cache["keys"] and (now - _jwks_cache["fetched_at"]) < JWKS_CACHE_TTL_SECONDS:
+        return {"keys": _jwks_cache["keys"]}
+
+    response = requests.get(CERTS_URL, timeout=5)
+    response.raise_for_status()
+    jwks = response.json()
+    _jwks_cache["keys"] = jwks.get("keys", [])
+    _jwks_cache["fetched_at"] = now
+    return jwks
+
+
+def _build_rsa_key(token: str, jwks: dict[str, Any]) -> dict[str, Any]:
+    unverified_header = jwt.get_unverified_header(token)
+    key_id = unverified_header.get("kid")
+    for key in jwks.get("keys", []):
+        if key.get("kid") == key_id:
+            return {
+                "kty": key.get("kty"),
+                "kid": key.get("kid"),
+                "use": key.get("use"),
+                "n": key.get("n"),
+                "e": key.get("e"),
+            }
+    return {}
+
 def get_current_user(token: str = Security(oauth2_scheme)):
     try:
-        # --- CLEANING ---
         if token.startswith("Bearer "):
             token = token.replace("Bearer ", "")
 
-        # --- 🕵️ PEEK INSIDE (No Verification) ---
-        # We look at the claims BEFORE validating to see what Keycloak sent
-        unverified_claims = jwt.get_unverified_claims(token)
-        print(f"👀 Token Claims (Audience): {unverified_claims.get('aud')}")
+        jwks = _get_jwks()
+        rsa_key = _build_rsa_key(token, jwks)
+        if not rsa_key:
+            raise JWTError("Unable to find matching JWKS key")
 
-        # 1. Get Keys
-        response = requests.get(CERTS_URL)
-        jwks = response.json()
-        
-        # 2. Decode Header
-        unverified_header = jwt.get_unverified_header(token)
-        rsa_key = {}
-        
-        for key in jwks["keys"]:
-            if key["kid"] == unverified_header["kid"]:
-                rsa_key = {
-                    "kty": key["kty"],
-                    "kid": key["kid"],
-                    "use": key["use"],
-                    "n": key["n"],
-                    "e": key["e"]
-                }
-        
-        # 3. Verify Token
-        # We explicitly pass the audience we found in the step above
-        payload = jwt.decode(
-            token,
-            rsa_key,
-            algorithms=["RS256"],
-            audience=unverified_claims.get('aud'), # <--- DYNAMICALLY MATCH AUDIENCE
-            options={"verify_at_hash": False}
-        )
-        
-        print(f"✅ SUCCESS: Verified user {payload.get('preferred_username')}")
-        return payload
+        last_error: Exception | None = None
+        for audience in EXPECTED_AUDIENCES:
+            try:
+                payload = jwt.decode(
+                    token,
+                    rsa_key,
+                    algorithms=["RS256"],
+                    audience=audience,
+                    issuer=EXPECTED_ISSUER,
+                    options={"verify_at_hash": False},
+                )
+                return payload
+            except Exception as exc:
+                last_error = exc
 
-    except Exception as e:
-        print(f"❌ AUTH ERROR: {e}")
+        if last_error:
+            raise last_error
+        raise JWTError("Token audience validation failed")
+
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",

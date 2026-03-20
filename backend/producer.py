@@ -9,13 +9,16 @@ from confluent_kafka.schema_registry.protobuf import ProtobufSerializer
 from schema.DecisionEvent_pb2 import DecisionEvent
 from datetime import datetime, timezone
 import os
-import sys
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # config
-BOOTSTRAP_SERVERS = "localhost:9093"
-SCHEMA_REGISTRY_URL = "http://localhost:8081"
-MODEL_URL = "http://localhost:8000/predict"
-TOPIC = "raw_decisions"
+BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9093")
+SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8081")
+MODEL_URL = os.getenv("MODEL_URL", "http://localhost:8000/predict")
+TOPIC = os.getenv("KAFKA_TOPIC", "raw_decisions")
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
 
 # proto schema
 sr_client = SchemaRegistryClient({"url": SCHEMA_REGISTRY_URL})
@@ -64,10 +67,16 @@ print("Producer starting (Limit: 100 requests)")
 try:
     while count < 100:
         applicant = generate_applicant()
+        applicant_id = str(uuid.uuid4())
+        applicant["applicant_id"] = applicant_id
         try:
-            resp = requests.post(MODEL_URL, json = applicant, timeout = 5)
+            headers = {}
+            if INTERNAL_API_KEY:
+                headers["X-Internal-Api-Key"] = INTERNAL_API_KEY
+
+            resp = requests.post(MODEL_URL, json=applicant, headers=headers, timeout=10)
             if resp.status_code != 200:
-                print("API error")
+                print(f"API error {resp.status_code}: {resp.text}")
                 time.sleep(1)
                 continue
             pred = resp.json()
@@ -77,13 +86,13 @@ try:
             continue
 
         event = DecisionEvent()
-        event.applicant_id = str(uuid.uuid4())
+        event.applicant_id = pred.get("applicant_id", applicant_id)
         event.age = applicant["age"]
         event.race = applicant["race"]
         event.sex = applicant["sex"]
         event.decision = pred["decision"]
         event.approval_probability = pred["approval_probability"]
-        event.timestamp_ms = int(datetime.now(timezone.utc).timestamp())
+        event.timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
         producer.produce(
             topic=TOPIC,

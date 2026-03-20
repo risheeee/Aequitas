@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? 'http://localhost:8000';
+
 interface Metrics {
   total_processed: number;
   male_approval_rate: number;
@@ -16,7 +18,7 @@ const RealTimeStats = () => {
   useEffect(() => {
     const fetchMetrics = async () => {
       try {
-        const response = await fetch('http://localhost:8000/metrics');
+        const response = await fetch(`${apiBaseUrl}/metrics`);
         const data = await response.json();
         
         // If the API returns "waiting", don't update state yet

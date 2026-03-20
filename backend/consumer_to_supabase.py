@@ -1,7 +1,6 @@
 import os
 import sys
-import time
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from confluent_kafka import DeserializingConsumer, KafkaError
 from confluent_kafka.schema_registry import SchemaRegistryClient
@@ -22,7 +21,7 @@ if not url or not key:
 supabase: Client = create_client(url, key)
 
 # kafka + schema registry config
-sr_client = SchemaRegistryClient({"url": "http://localhost:8081"})
+sr_client = SchemaRegistryClient({"url": os.environ.get("SCHEMA_REGISTRY_URL", "http://localhost:8081")})
 protobuf_deserializer = ProtobufDeserializer(DecisionEvent, {'use.deprecated.format': False})
 string_deserializer = StringDeserializer('utf_8')
 
@@ -35,7 +34,7 @@ conf = {
 }
 
 consumer = DeserializingConsumer(conf)
-topic = os.environ.get("KAFKA_TOPIC")
+topic = os.environ.get("KAFKA_TOPIC", "raw_decisions")
 consumer.subscribe([topic])
 
 print(f"consumer started. listening to '{topic}'")
@@ -60,11 +59,23 @@ try:
             continue
 
         try:
-            # convert the timestamp for supabase / postgre format
-            obj = datetime.fromtimestamp(event.timestamp_ms)
-            iso_timestamp = obj.isoformat()
+            # Convert protobuf millisecond epoch to ISO8601 UTC for PostgreSQL.
+            event_seconds = event.timestamp_ms / 1000
+            iso_timestamp = datetime.fromtimestamp(event_seconds, tz=timezone.utc).isoformat()
 
-            # preprare paylaod
+            existing = (
+                supabase
+                .table("decisions")
+                .select("id")
+                .eq("applicant_id", event.applicant_id)
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                print(f"Skipping duplicate applicant_id={event.applicant_id[:8]}...")
+                continue
+
+            # preprare payload
             row = {
                 "applicant_id": event.applicant_id,
                 "age": event.age,
@@ -76,7 +87,7 @@ try:
             }
 
             # insert into supabase
-            response = supabase.table("decisions").insert(row).execute()        # 'decisions' is the table name in sql created on supabase
+            supabase.table("decisions").insert(row).execute()        # 'decisions' is the table name in sql created on supabase
             print(f"🥵 Saved: {event.applicant_id[:8]}... | Dec: {event.decision} | Prob: {event.approval_probability:.2f}")
 
         except Exception as e:

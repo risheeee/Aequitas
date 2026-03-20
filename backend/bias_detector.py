@@ -15,8 +15,8 @@ load_dotenv()
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9093")
 SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8081")
 TOPIC = "raw_decisions"
-REDIS_HOST = "localhost"
-REDIS_PORT = 6379
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 WINDOW_SIZE = 100 
 decision_window = deque(maxlen=WINDOW_SIZE)

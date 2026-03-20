@@ -4,6 +4,23 @@ import { AlertCircle, CheckCircle, ShieldAlert, Lock, FileText, X } from 'lucide
 import { useAuth } from 'react-oidc-context'
 import RealTimeStats from './RealTimeStats'
 
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? 'http://localhost:8000'
+const EVIDENCE_MARKER = '[EVIDENCE_JSON]'
+
+interface GroundedFactor {
+  feature: string
+  label: string
+  value: number
+  contribution: number
+}
+
+interface ExplanationEvidencePayload {
+  top_factors?: GroundedFactor[]
+  threshold?: number
+  model?: string
+  version?: string
+}
+
 // 1. Updated Interface to include the Explanation
 interface Decision {
   id: string
@@ -15,6 +32,26 @@ interface Decision {
   probability: number
   explanation: string // <--- NEW FIELD
   created_at: string
+}
+
+function extractExplanationParts(rawText?: string): { summary: string; payload: ExplanationEvidencePayload | null } {
+  if (!rawText) {
+    return { summary: 'No explanation available.', payload: null }
+  }
+
+  const markerIndex = rawText.indexOf(EVIDENCE_MARKER)
+  if (markerIndex === -1) {
+    return { summary: rawText, payload: null }
+  }
+
+  const summary = rawText.slice(0, markerIndex).trim()
+  const payloadText = rawText.slice(markerIndex + EVIDENCE_MARKER.length).trim()
+
+  try {
+    return { summary, payload: JSON.parse(payloadText) as ExplanationEvidencePayload }
+  } catch {
+    return { summary, payload: null }
+  }
 }
 
 export default function Dashboard() {
@@ -68,7 +105,7 @@ export default function Dashboard() {
     if (!token) { alert("No token found."); return }
 
     try {
-      const res = await fetch('http://localhost:8000/secure-test', {
+      const res = await fetch(`${apiBaseUrl}/secure-test`, {
         headers: { 'Authorization': `Bearer ${token}` }
       })
       if (res.ok) {
@@ -172,6 +209,10 @@ export default function Dashboard() {
 
       {/* 4. THE POPUP MODAL */}
       {selectedDecision && (
+        (() => {
+          const { summary, payload } = extractExplanationParts(selectedDecision.explanation)
+          const factors = payload?.top_factors ?? []
+          return (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full overflow-hidden transform transition-all">
             
@@ -198,9 +239,38 @@ export default function Dashboard() {
                   AI Generated Explanation
                 </h4>
                 <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 text-gray-700 italic leading-relaxed">
-                  "{selectedDecision.explanation || "No explanation available."}"
+                  "{summary}"
                 </div>
               </div>
+
+              {factors.length > 0 && (
+                <div className="mb-6">
+                  <h4 className="text-sm font-bold text-gray-700 uppercase tracking-wider mb-2">
+                    Grounded Factors
+                  </h4>
+                  <div className="space-y-2">
+                    {factors.map((factor, index) => {
+                      const isNegative = factor.contribution < 0
+                      return (
+                        <div key={`${factor.feature}-${index}`} className="bg-white p-3 border rounded text-sm flex justify-between items-center">
+                          <div>
+                            <p className="font-medium text-gray-800">{factor.label}</p>
+                            <p className="text-xs text-gray-500">Value: {factor.value}</p>
+                          </div>
+                          <span className={`font-mono font-bold ${isNegative ? 'text-red-600' : 'text-green-700'}`}>
+                            {factor.contribution >= 0 ? '+' : ''}{factor.contribution.toFixed(4)}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  {payload?.model && (
+                    <p className="text-xs text-gray-500 mt-2">
+                      Evidence model: {payload.model}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Technical Details Grid */}
               <div className="grid grid-cols-2 gap-4 text-sm">
@@ -232,6 +302,8 @@ export default function Dashboard() {
 
           </div>
         </div>
+          )
+        })()
       )}
     </div>
   )
