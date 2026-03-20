@@ -40,6 +40,19 @@ To bridge the gap between black-box ML and human understanding, the system uses 
 2. **Evidence Selection:** Top contributors are selected as auditable evidence tied to the exact inference.
 3. **Deterministic Rewriting:** The **Flan-T5-Base** model rewrites only those selected facts with deterministic decoding.
 
+### 3. Model Benchmark Suite
+
+Use the benchmark script to compare multiple models on predictive performance, fairness gaps, and inference latency.
+
+```bash
+python backend/benchmark_models.py
+```
+
+Artifacts are saved to:
+
+* `backend/model/benchmark_results.csv`
+* `backend/model/benchmark_results.md`
+
 ## Installation & Setup
 
 ### Prerequisites
