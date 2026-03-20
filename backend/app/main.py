@@ -15,6 +15,7 @@ import uuid
 import xgboost as xgb
 from typing import Any
 import google.generativeai as genai
+from pathlib import Path
 
 EVIDENCE_MARKER = "[EVIDENCE_JSON]"
 
@@ -52,7 +53,34 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "../model/biased_loan_model.pkl")
-model = joblib.load(MODEL_PATH)
+ACTIVE_MODEL_POINTER_PATH = os.path.join(os.path.dirname(__file__), "../model/active_model.json")
+
+
+def _load_model_from_path(model_path: str):
+    return joblib.load(model_path)
+
+
+def _load_active_model_info() -> dict[str, Any]:
+    if os.path.exists(ACTIVE_MODEL_POINTER_PATH):
+        try:
+            with open(ACTIVE_MODEL_POINTER_PATH, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            selected_path = payload.get("path")
+            if selected_path and os.path.exists(selected_path):
+                return payload
+        except Exception:
+            pass
+
+    return {
+        "name": "xgboost-default",
+        "path": os.path.abspath(MODEL_PATH),
+        "run_id": None,
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
+active_model_info = _load_active_model_info()
+model = _load_model_from_path(active_model_info["path"])
 
 url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")
@@ -113,6 +141,11 @@ class Applicant(BaseModel):
     hours_per_week: int = 0
     native_country: int = 0
 
+
+class ActivateModelRequest(BaseModel):
+    model_name: str
+    run_id: str | None = None
+
 def verify_internal_api_key(x_internal_api_key: str | None = Header(default=None)) -> None:
     required_key = os.getenv("INTERNAL_API_KEY")
     if required_key and required_key.strip().lower() in {"change_me", ""}:
@@ -125,22 +158,40 @@ def verify_internal_api_key(x_internal_api_key: str | None = Header(default=None
 
 
 def _compute_feature_contributions(df: pd.DataFrame) -> list[dict[str, Any]]:
+    def _format_factors(contributions: list[float]) -> list[dict[str, Any]]:
+        factors: list[dict[str, Any]] = []
+        for idx, feature in enumerate(FEATURE_ORDER):
+            factors.append(
+                {
+                    "feature": feature,
+                    "label": FEATURE_LABELS.get(feature, feature),
+                    "value": float(df.iloc[0][feature]),
+                    "contribution": float(contributions[idx]),
+                }
+            )
+        return factors
+
+    # Preferred path for XGBoost models with SHAP-style local contributions.
     try:
         dmatrix = xgb.DMatrix(df, feature_names=FEATURE_ORDER)
         contributions = model.get_booster().predict(dmatrix, pred_contribs=True)[0]
+        return _format_factors([float(c) for c in contributions[: len(FEATURE_ORDER)]])
+    except Exception:
+        pass
+
+    # Model-agnostic fallback: estimate local feature effect via one-feature perturbation.
+    try:
+        baseline_prob = float(model.predict_proba(df)[0][1])
+        local_effects: list[float] = []
+        for feature in FEATURE_ORDER:
+            perturbed = df.copy()
+            perturbed.loc[:, feature] = 0.0
+            perturbed_prob = float(model.predict_proba(perturbed)[0][1])
+            local_effects.append(baseline_prob - perturbed_prob)
+
+        return _format_factors(local_effects)
     except Exception:
         return []
-
-    factors: list[dict[str, Any]] = []
-    for idx, feature in enumerate(FEATURE_ORDER):
-        factors.append({
-            "feature": feature,
-            "label": FEATURE_LABELS.get(feature, feature),
-            "value": float(df.iloc[0][feature]),
-            "contribution": float(contributions[idx]),
-        })
-
-    return factors
 
 
 def _build_grounded_summary(decision: int, prob: float, factors: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
@@ -259,6 +310,104 @@ def _serialize_explanation_for_storage(explanation_text: str, selected_factors: 
     }
     return f"{explanation_text}\n\n{EVIDENCE_MARKER}{json.dumps(payload, separators=(',', ':'))}"
 
+
+def _load_latest_benchmark_from_csv() -> dict[str, Any] | None:
+    csv_path = os.path.join(os.path.dirname(__file__), "../model/benchmark_results.csv")
+    if not os.path.exists(csv_path):
+        return None
+
+    try:
+        benchmark_df = pd.read_csv(csv_path)
+        if benchmark_df.empty:
+            return None
+
+        top = benchmark_df.sort_values(by=["roc_auc", "pr_auc"], ascending=False).iloc[0].to_dict()
+        return {
+            "source": "csv",
+            "run_id": top.get("run_id"),
+            "created_at": top.get("created_at"),
+            "best_model": top,
+            "models": benchmark_df.to_dict(orient="records"),
+        }
+    except Exception:
+        return None
+
+
+def _load_latest_benchmark_from_supabase() -> dict[str, Any] | None:
+    try:
+        latest_run = (
+            supabase
+            .table("model_benchmarks")
+            .select("run_id,created_at")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        if not latest_run.data:
+            return None
+
+        run_id = latest_run.data[0]["run_id"]
+        created_at = latest_run.data[0].get("created_at")
+
+        run_rows = (
+            supabase
+            .table("model_benchmarks")
+            .select("*")
+            .eq("run_id", run_id)
+            .execute()
+        )
+
+        if not run_rows.data:
+            return None
+
+        rows = sorted(run_rows.data, key=lambda row: (row.get("roc_auc", 0), row.get("pr_auc", 0)), reverse=True)
+        return {
+            "source": "supabase",
+            "run_id": run_id,
+            "created_at": created_at,
+            "best_model": rows[0],
+            "models": rows,
+        }
+    except Exception:
+        return None
+
+
+def _load_benchmark_for_run_id(run_id: str) -> dict[str, Any] | None:
+    if not run_id:
+        return None
+    try:
+        run_rows = (
+            supabase
+            .table("model_benchmarks")
+            .select("*")
+            .eq("run_id", run_id)
+            .execute()
+        )
+        if run_rows.data:
+            rows = sorted(run_rows.data, key=lambda row: (row.get("roc_auc", 0), row.get("pr_auc", 0)), reverse=True)
+            return {
+                "source": "supabase",
+                "run_id": run_id,
+                "created_at": rows[0].get("created_at"),
+                "best_model": rows[0],
+                "models": rows,
+            }
+    except Exception:
+        pass
+
+    csv_result = _load_latest_benchmark_from_csv()
+    if csv_result and str(csv_result.get("run_id")) == str(run_id):
+        return csv_result
+    return None
+
+
+def _persist_active_model_info(payload: dict[str, Any]) -> None:
+    model_dir = os.path.dirname(ACTIVE_MODEL_POINTER_PATH)
+    os.makedirs(model_dir, exist_ok=True)
+    with open(ACTIVE_MODEL_POINTER_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
 @app.get("/")
 def root():
     return {"status": "Aequitas API running"}
@@ -320,3 +469,81 @@ def get_metrics():
         return json.loads(data)
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/model-benchmarks/latest")
+def get_latest_model_benchmarks():
+    result = _load_latest_benchmark_from_supabase() or _load_latest_benchmark_from_csv()
+    if not result:
+        return {
+            "status": "missing",
+            "message": "No benchmark data found. Run backend/benchmark_models.py first.",
+        }
+    return {
+        "status": "ok",
+        "active_model": active_model_info,
+        **result,
+    }
+
+
+@app.get("/models/active")
+def get_active_model():
+    return {
+        "status": "ok",
+        "active_model": active_model_info,
+    }
+
+
+@app.get("/models/available")
+def get_available_models(run_id: str | None = None):
+    snapshot = _load_benchmark_for_run_id(run_id) if run_id else (_load_latest_benchmark_from_supabase() or _load_latest_benchmark_from_csv())
+    if not snapshot:
+        return {
+            "status": "missing",
+            "message": "No benchmark data found. Run backend/benchmark_models.py first.",
+        }
+    return {
+        "status": "ok",
+        "run_id": snapshot.get("run_id"),
+        "created_at": snapshot.get("created_at"),
+        "models": snapshot.get("models", []),
+        "active_model": active_model_info,
+    }
+
+
+@app.post("/models/activate")
+def activate_model(request: ActivateModelRequest, user: dict = Depends(get_current_user)):
+    del user
+    snapshot = _load_benchmark_for_run_id(request.run_id) if request.run_id else (_load_latest_benchmark_from_supabase() or _load_latest_benchmark_from_csv())
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="No benchmark snapshot found")
+
+    matches = [row for row in snapshot.get("models", []) if row.get("model_name") == request.model_name]
+    if not matches:
+        raise HTTPException(status_code=404, detail=f"Model '{request.model_name}' not found in benchmark snapshot")
+
+    model_row = matches[0]
+    artifact_path = model_row.get("model_artifact_path")
+    if not artifact_path:
+        raise HTTPException(status_code=400, detail="Selected model row has no artifact path")
+    if not Path(artifact_path).exists():
+        raise HTTPException(status_code=404, detail=f"Model artifact not found: {artifact_path}")
+
+    global model, active_model_info
+    try:
+        model = _load_model_from_path(artifact_path)
+        active_model_info = {
+            "name": request.model_name,
+            "path": str(artifact_path),
+            "run_id": snapshot.get("run_id"),
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        _persist_active_model_info(active_model_info)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to activate model: {exc}") from exc
+
+    return {
+        "status": "ok",
+        "message": f"Activated model '{request.model_name}'",
+        "active_model": active_model_info,
+    }

@@ -53,6 +53,54 @@ Artifacts are saved to:
 * `backend/model/benchmark_results.csv`
 * `backend/model/benchmark_results.md`
 
+The backend now exposes the latest benchmark snapshot at:
+
+```bash
+GET /model-benchmarks/latest
+```
+
+Optional: Persist benchmark runs in Supabase by creating `model_benchmarks`:
+
+```sql
+create table if not exists public.model_benchmarks (
+	id bigserial primary key,
+	run_id text not null,
+	created_at timestamptz not null,
+	model_name text not null,
+	roc_auc double precision not null,
+	pr_auc double precision not null,
+	brier_score double precision not null,
+	disparate_impact_sex double precision not null,
+	disparate_impact_race double precision not null,
+	equal_opportunity_gap_sex double precision not null,
+	equal_opportunity_gap_race double precision not null,
+	train_seconds double precision not null,
+	inference_ms_per_1000 double precision not null,
+	model_artifact_path text not null
+);
+
+create index if not exists idx_model_benchmarks_run_id on public.model_benchmarks(run_id);
+create index if not exists idx_model_benchmarks_created_at on public.model_benchmarks(created_at desc);
+```
+
+Model governance APIs:
+
+```bash
+GET /model-benchmarks/latest
+GET /models/available
+GET /models/active
+POST /models/activate
+```
+
+`POST /models/activate` expects:
+
+```json
+{
+	"model_name": "xgboost",
+	"run_id": "bench-..."
+}
+```
+
 ## Installation & Setup
 
 ### Prerequisites

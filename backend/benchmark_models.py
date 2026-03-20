@@ -1,13 +1,21 @@
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from uuid import uuid4
 
 import pandas as pd
+from dotenv import load_dotenv
+import joblib
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 from sklearn.model_selection import train_test_split
+from supabase import create_client
 from xgboost import XGBClassifier
+
+
+load_dotenv()
 
 
 ADULT_DATA_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data"
@@ -42,6 +50,7 @@ class BenchmarkResult:
     equal_opportunity_gap_race: float
     train_seconds: float
     inference_ms_per_1000: float
+    model_artifact_path: str
 
 
 def _disparate_impact(y_pred: pd.Series, privileged_mask: pd.Series) -> float:
@@ -117,6 +126,10 @@ def run_benchmark() -> pd.DataFrame:
         stratify=y,
     )
 
+    run_id = f"bench-{uuid4()}"
+    model_output_dir = os.path.join(os.path.dirname(__file__), "model", "candidates", run_id)
+    os.makedirs(model_output_dir, exist_ok=True)
+
     models = {
         "logistic_regression": LogisticRegression(max_iter=1000, random_state=42),
         "random_forest": RandomForestClassifier(
@@ -148,6 +161,8 @@ def run_benchmark() -> pd.DataFrame:
 
         y_prob = model.predict_proba(X_test)[:, 1]
         y_pred = (y_prob >= 0.5).astype(int)
+        artifact_path = os.path.join(model_output_dir, f"{model_name}.pkl")
+        joblib.dump(model, artifact_path)
 
         result = BenchmarkResult(
             model_name=model_name,
@@ -172,17 +187,48 @@ def run_benchmark() -> pd.DataFrame:
             ),
             train_seconds=float(train_seconds),
             inference_ms_per_1000=float(_measure_inference_ms_per_1000(model, X_test)),
+            model_artifact_path=os.path.abspath(artifact_path),
         )
         results.append(result)
 
     leaderboard = pd.DataFrame([vars(r) for r in results]).sort_values(
         by=["roc_auc", "pr_auc"], ascending=False
     )
+    leaderboard.insert(0, "run_id", run_id)
+    leaderboard.insert(1, "created_at", datetime.now(timezone.utc).isoformat())
     return leaderboard
+
+
+def persist_benchmark_to_supabase(leaderboard: pd.DataFrame, run_id: str, created_at: str) -> None:
+    supabase_url = os.getenv("SUPABASE_URL", "").strip()
+    supabase_key = os.getenv("SUPABASE_KEY", "").strip()
+    if not supabase_url or not supabase_key:
+        print("Skipping Supabase benchmark persistence: missing SUPABASE_URL/SUPABASE_KEY")
+        return
+
+    try:
+        supabase = create_client(supabase_url, supabase_key)
+        records = []
+        for row in leaderboard.to_dict(orient="records"):
+            records.append(
+                {
+                    **row,
+                }
+            )
+
+        supabase.table("model_benchmarks").insert(records).execute()
+        print(f"Persisted {len(records)} benchmark rows to Supabase table 'model_benchmarks'")
+    except Exception as exc:
+        print(
+            "Could not persist benchmark rows to Supabase table 'model_benchmarks'. "
+            f"Create the table first if needed. Error: {exc}"
+        )
 
 
 def main() -> None:
     leaderboard = run_benchmark()
+    run_id = str(leaderboard.iloc[0]["run_id"])
+    created_at = str(leaderboard.iloc[0]["created_at"])
 
     output_dir = os.path.join(os.path.dirname(__file__), "model")
     os.makedirs(output_dir, exist_ok=True)
@@ -200,6 +246,8 @@ def main() -> None:
     print(leaderboard.to_string(index=False))
     print(f"\nSaved CSV: {csv_path}")
     print(f"Saved Markdown: {md_path}")
+
+    persist_benchmark_to_supabase(leaderboard, run_id=run_id, created_at=created_at)
 
 
 if __name__ == "__main__":

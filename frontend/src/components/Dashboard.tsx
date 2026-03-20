@@ -21,6 +21,34 @@ interface ExplanationEvidencePayload {
   version?: string
 }
 
+interface BenchmarkModelRow {
+  model_name: string
+  roc_auc: number
+  pr_auc: number
+  brier_score: number
+  disparate_impact_sex: number
+  disparate_impact_race: number
+  equal_opportunity_gap_sex: number
+  equal_opportunity_gap_race: number
+  inference_ms_per_1000: number
+  created_at?: string
+}
+
+interface BenchmarkPayload {
+  status: 'ok' | 'missing'
+  source?: 'supabase' | 'csv'
+  run_id?: string
+  created_at?: string
+  best_model?: BenchmarkModelRow
+  models?: BenchmarkModelRow[]
+  active_model?: {
+    name?: string
+    path?: string
+    run_id?: string
+    updated_at?: string
+  }
+}
+
 // 1. Updated Interface to include the Explanation
 interface Decision {
   id: string
@@ -58,12 +86,16 @@ export default function Dashboard() {
   const auth = useAuth()
   const [decisions, setDecisions] = useState<Decision[]>([])
   const [stats, setStats] = useState({ total: 0, denied: 0 })
+  const [benchmark, setBenchmark] = useState<BenchmarkPayload | null>(null)
+  const [showModelModal, setShowModelModal] = useState(false)
+  const [activatingModel, setActivatingModel] = useState<string | null>(null)
   
   // 2. State for the Popup Modal
   const [selectedDecision, setSelectedDecision] = useState<Decision | null>(null)
 
   useEffect(() => {
     fetchDecisions()
+    fetchLatestBenchmark()
     
     const subscription = supabase
       .channel('realtime:decisions')
@@ -76,6 +108,24 @@ export default function Dashboard() {
 
     return () => { supabase.removeChannel(subscription) }
   }, [])
+
+  function fairnessRiskLabel(row: BenchmarkModelRow): { label: string; className: string } {
+    const dirSexOk = row.disparate_impact_sex >= 0.8
+    const dirRaceOk = row.disparate_impact_race >= 0.8
+    const eogSexOk = Math.abs(row.equal_opportunity_gap_sex) <= 0.1
+    const eogRaceOk = Math.abs(row.equal_opportunity_gap_race) <= 0.1
+
+    const allOk = dirSexOk && dirRaceOk && eogSexOk && eogRaceOk
+    const anyOk = dirSexOk || dirRaceOk || eogSexOk || eogRaceOk
+
+    if (allOk) {
+      return { label: 'Low Fairness Risk', className: 'bg-green-100 text-green-800' }
+    }
+    if (anyOk) {
+      return { label: 'Medium Fairness Risk', className: 'bg-yellow-100 text-yellow-800' }
+    }
+    return { label: 'High Fairness Risk', className: 'bg-red-100 text-red-800' }
+  }
 
   const updateStats = (d: Decision) => {
     setStats(prev => ({
@@ -97,6 +147,54 @@ export default function Dashboard() {
       const total = data?.length || 0
       const denied = data?.filter(d => d.decision === 0).length || 0
       setStats({ total, denied })
+    }
+  }
+
+  async function fetchLatestBenchmark() {
+    try {
+      const response = await fetch(`${apiBaseUrl}/model-benchmarks/latest`)
+      const data = (await response.json()) as BenchmarkPayload
+      setBenchmark(data)
+    } catch (error) {
+      console.error('Error fetching benchmark:', error)
+      setBenchmark(null)
+    }
+  }
+
+  async function activateModel(modelName: string) {
+    const token = auth.user?.access_token
+    if (!token) {
+      alert('No auth token available. Please log in again.')
+      return
+    }
+
+    try {
+      setActivatingModel(modelName)
+      const response = await fetch(`${apiBaseUrl}/models/activate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          model_name: modelName,
+          run_id: benchmark?.run_id ?? null,
+        }),
+      })
+
+      const payload = await response.json()
+      if (!response.ok) {
+        alert(`Failed to activate model: ${payload?.detail || response.statusText}`)
+        return
+      }
+
+      alert(`✅ ${payload.message}`)
+      await fetchLatestBenchmark()
+    } catch (error) {
+      console.error('Error activating model:', error)
+      alert('Failed to activate model due to a network/server error.')
+    } finally {
+      setActivatingModel(null)
     }
   }
 
@@ -152,6 +250,73 @@ export default function Dashboard() {
 
         {/* REAL-TIME HUD */}
         <RealTimeStats />
+
+        {/* MODEL GOVERNANCE */}
+        <div className="bg-white shadow rounded-lg border border-gray-100 p-6 mb-8">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-medium text-gray-900">Model Governance Snapshot</h3>
+            <div className="flex items-center gap-4">
+              <button
+                onClick={() => setShowModelModal(true)}
+                className="text-xs font-semibold uppercase text-blue-600 hover:text-blue-800"
+              >
+                View All Models
+              </button>
+              <button
+                onClick={fetchLatestBenchmark}
+                className="text-xs font-semibold uppercase text-blue-600 hover:text-blue-800"
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
+
+          {benchmark?.status === 'ok' && benchmark.best_model ? (
+            (() => {
+              const risk = fairnessRiskLabel(benchmark.best_model)
+              return (
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-4 text-sm">
+                  <div className="bg-gray-50 p-4 rounded border">
+                    <p className="text-xs text-gray-500 uppercase">Best Model</p>
+                    <p className="font-bold text-gray-800 mt-1">{benchmark.best_model.model_name}</p>
+                    <p className="text-xs text-gray-500 mt-1">Source: {benchmark.source}</p>
+                    {benchmark.active_model?.name && (
+                      <p className="text-xs text-gray-500 mt-1">Active: {benchmark.active_model.name}</p>
+                    )}
+                  </div>
+                  <div className="bg-gray-50 p-4 rounded border">
+                    <p className="text-xs text-gray-500 uppercase">ROC-AUC / PR-AUC</p>
+                    <p className="font-mono font-bold text-gray-800 mt-1">
+                      {benchmark.best_model.roc_auc.toFixed(3)} / {benchmark.best_model.pr_auc.toFixed(3)}
+                    </p>
+                  </div>
+                  <div className="bg-gray-50 p-4 rounded border">
+                    <p className="text-xs text-gray-500 uppercase">Latency</p>
+                    <p className="font-mono font-bold text-gray-800 mt-1">
+                      {benchmark.best_model.inference_ms_per_1000.toFixed(2)} ms / 1k
+                    </p>
+                  </div>
+                  <div className="bg-gray-50 p-4 rounded border">
+                    <p className="text-xs text-gray-500 uppercase">Fairness Signal</p>
+                    <span className={`inline-flex px-2 py-1 rounded text-xs font-semibold mt-1 ${risk.className}`}>
+                      {risk.label}
+                    </span>
+                  </div>
+                  <div className="bg-gray-50 p-4 rounded border">
+                    <p className="text-xs text-gray-500 uppercase">Last Benchmark</p>
+                    <p className="font-medium text-gray-800 mt-1">
+                      {benchmark.created_at ? new Date(benchmark.created_at).toLocaleString() : 'Unknown'}
+                    </p>
+                  </div>
+                </div>
+              )
+            })()
+          ) : (
+            <p className="text-sm text-gray-500">
+              No benchmark data available yet. Run `python backend/benchmark_models.py` to populate governance metrics.
+            </p>
+          )}
+        </div>
 
         {/* TABLE */}
         <div className="bg-white shadow rounded-lg overflow-hidden mt-8">
@@ -304,6 +469,70 @@ export default function Dashboard() {
         </div>
           )
         })()
+      )}
+
+      {showModelModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-2xl max-w-5xl w-full overflow-hidden">
+            <div className="px-6 py-4 border-b flex justify-between items-center">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">All Benchmark Models</h3>
+                <p className="text-xs text-gray-500">
+                  Run: {benchmark?.run_id ?? 'Unknown'}
+                </p>
+              </div>
+              <button onClick={() => setShowModelModal(false)} className="text-gray-400 hover:text-gray-600">
+                <X size={24} />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-auto max-h-[70vh]">
+              <table className="min-w-full divide-y divide-gray-200 text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Model</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">ROC-AUC</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">PR-AUC</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">DIR (Sex/Race)</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Latency</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {(benchmark?.models ?? []).map((row) => {
+                    const isActive = benchmark?.active_model?.name === row.model_name
+                    return (
+                      <tr key={row.model_name}>
+                        <td className="px-4 py-3 font-medium text-gray-800">
+                          {row.model_name}
+                          {isActive && (
+                            <span className="ml-2 inline-flex px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">Active</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 font-mono">{row.roc_auc.toFixed(3)}</td>
+                        <td className="px-4 py-3 font-mono">{row.pr_auc.toFixed(3)}</td>
+                        <td className="px-4 py-3 font-mono">{row.disparate_impact_sex.toFixed(3)} / {row.disparate_impact_race.toFixed(3)}</td>
+                        <td className="px-4 py-3 font-mono">{row.inference_ms_per_1000.toFixed(2)} ms</td>
+                        <td className="px-4 py-3">
+                          <button
+                            disabled={isActive || activatingModel === row.model_name}
+                            onClick={() => activateModel(row.model_name)}
+                            className="px-3 py-1 rounded border border-gray-300 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                          >
+                            {activatingModel === row.model_name ? 'Activating...' : isActive ? 'Active' : 'Set Active'}
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+              {(benchmark?.models ?? []).length === 0 && (
+                <p className="text-sm text-gray-500">No models found in benchmark snapshot.</p>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
